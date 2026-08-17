@@ -602,59 +602,52 @@ costs/latency bounded to one (maybe two) calls per generation.
 
 Ordered to get a thin vertical slice (prompt → route → GPX) working before
 layering community features. Each phase should be independently shippable/
-demoable.
+demoable. **Status below reflects what's actually built**, not the plan.
 
-### Phase 0 — Foundations (infra, no features)
-- Repo scaffold: Hono API + Vite/React app in a monorepo (pnpm workspaces).
-- PostgreSQL + PostGIS running locally via Docker Compose.
-- Drizzle schema (from §2, minus `road_segments`) + migrations.
-- Self-hosted GraphHopper (Docker) with a Slovenia `.osm.pbf` extract
-  (Geofabrik) loaded — confirm `round_trip` routing works via raw API calls
-  (Postman/curl) before writing any app code against it.
-- Decide & wire auth (recommend Better Auth or Lucia for a TS-native, low-
-  overhead session auth — full OAuth/social login is not MVP-critical).
+### ✅ Phase 0 — Foundations — DONE
+- Repo scaffold: Hono API + Vite/React app in a pnpm-workspace monorepo.
+- PostgreSQL + PostGIS via Docker Compose (`docker-compose.yml`).
+- Drizzle schema + migrations (grew to 7 tables, not 5 — see §2.1).
+- Self-hosted GraphHopper (Docker) with the Slovenia OSM extract; `round_trip` verified via raw curl before any app code was written against it (`infra/graphhopper/README.md`).
+- **Auth**: not wired. Deferred to Phase 4 as planned — nothing needed it yet.
 
-### Phase 1 — Manual route generation (no AI yet)
-- Hono endpoint `POST /routes/generate` accepting **structured**
-  `RouteConstraints` only (no NL prompt yet) → calls GraphHopper → returns
-  ranked candidates.
-- Curvature scoring function (turf.js turn-angle analysis) implemented and
-  unit-tested against known routes (e.g. Vršič should score very high).
-- React: map view (Mapbox GL or Leaflet — pick one, see note below), a form
-  (origin, duration, curviness, surface pref), render candidate route(s) on
-  map with distance/duration/curviness stats.
-- GPX export endpoint + download button. This is a small, self-contained
-  win to ship early — validates the whole pipeline end-to-end.
-- **Milestone: a user can fill a form, get a real twisty loop, and load the
-  GPX onto a real GPS device/app.** This de-risks the hardest technical
-  unknowns (GraphHopper round-trip quality, GPX compatibility) before any AI
-  work begins.
+### ✅ Phase 1 — Manual route generation — DONE
+- `POST /routes/generate` (structured constraints, JSON response) → GraphHopper → ranked candidates.
+- Curvature scoring (turf.js turn-angle-per-km), unit-tested — calibrated against real GraphHopper output: A1 motorway ~0.03, a Rakitna-area rural road ~0.22, the Vršič switchbacks ~0.86.
+- React: map, structured form, candidates rendered with stats.
+- GPX export + download button, working end-to-end onto a real GPX file.
+- **Milestone met**: verified live in a headless browser, not just the API.
 
-### Phase 2 — AI prompt-to-constraints layer
-- Wire Vercel AI SDK `generateObject` step (§4.2 Step 1) with the
-  Slovenia-aware system prompt.
-- Gazetteer table + `lookupPlace` tool + grounding step (§4.2 Step 2).
-- Replace/augment the Phase 1 form with a prompt input box; keep the
-  structured form as a fallback/advanced-mode (also useful for testing).
-- SSE streaming from Hono → React so the UI can show "interpreting your
-  request..." → "generating candidates..." progressively.
+### ✅ Phase 2 — AI prompt-to-constraints layer — DONE
+- `generateText` + `Output.object` (not `generateObject`, deprecated — §4.2), Slovenia-aware system prompt.
+- Gazetteer table + deterministic grounding (not a tool call — §4.2 Step 2).
+- Prompt input ("Describe" tab) alongside the structured form ("Advanced" tab).
+- SSE streaming (`POST /ai/generate`) with progressive "interpreting…" → "generating…" states.
+- Provider-agnostic across Anthropic/OpenAI/OpenRouter (§4.4).
 
-### Phase 3 — Surface quality & POI enrichment
-- Import OSM `surface`/`highway` tags for Slovenia into a `road_segments`
-  cache table (osm2pgsql or a custom Osmium-based ETL script), enabling the
-  `surfacePref` filter and `surfaceBreakdown` stat.
-- Seed initial POIs manually (a curated CSV of ~30-50 known biker
-  cafes/viewpoints/passes) rather than building POI submission UI yet.
-- Show POIs on the map along generated routes.
+### ✅ Phase 3 — Surface quality & POI enrichment — DONE
+- `road_segments` cache (Python/pyosmium ETL, `infra/road-surfaces/`), 140k rows, `surfacePref` actually enforced in ranking.
+- 8 real biker cafés (user-curated CSV, geocoded via Nominatim) + passes/viewpoints seeded — not the full 30-50 the original plan mentioned, but the plan explicitly said that was optional for a first pass.
+- POIs shown on the map — as an always-visible layer (fetched once on load), not gated on a generated route passing nearby, after a live UX bug report showed the latter meant POIs were essentially never visible with only 8 seeded.
 
-### Phase 4 — Save, rate, share (community layer)
+### ✅ Phase 3.5 — Unplanned: bug-fix round from live usage
+Not in the original roadmap, but substantial enough to call out — five real
+bugs found via actually using the app (not just testing the API), each with
+a live-verified fix. Full detail in `README.md`; summarized in §0.1. Worth
+noting as a pattern: every one of these was invisible to typechecking,
+unit tests, or API-level curl testing, and only surfaced by generating
+real routes and looking at the map.
+
+### ⬜ Phase 4 — Save, rate, share (community layer) — NOT STARTED
 - `POST /routes` (save a generated candidate), user's "My Routes" list.
 - Route detail page with `visibility` (private/unlisted/public).
 - Ratings endpoints + UI (scenic/surface/fun scores + comment).
 - Public route browsing (`GET /routes?visibility=public`) with basic
   filters (near me, duration).
+- **Needs auth first** — nothing in Phase 0-3 required it, so it's still an
+  open question, not just an implementation task (see "Open decisions" below).
 
-### Phase 5 — Community POI contribution + moderation
+### ⬜ Phase 5 — Community POI contribution + moderation — NOT STARTED
 - `POST /pois` from users (unverified by default).
 - Minimal admin/moderation view to verify submitted POIs.
 - Mountain pass condition integration (`/conditions/passes`) sourced from a
@@ -665,24 +658,31 @@ demoable.
   covers this need).
 - Real-time multi-rider group tracking.
 - Native mobile app (responsive web is sufficient for MVP).
-- Full agentic multi-step AI tool loop (two-pass extract→ground is enough
-  until the constraint schema demonstrably needs it).
+- Full agentic multi-step AI tool loop — the two-pass extract→ground that
+  shipped has held up fine through Phase 3; no evidence yet it needs to
+  become agentic.
 - Weather-based dynamic rerouting (static "pass condition" flag is enough
   initially; live weather-aware routing is a strong v2 candidate).
 - User-to-user messaging/social graph.
 
-### Open decisions to make before/during Phase 0
-- **Mapbox GL JS vs. Leaflet**: Mapbox has nicer default styling and vector
-  tiles but has usage-based pricing and a token; Leaflet + an open tile
-  source (e.g. OpenFreeMap or self-hosted) is fully free but more manual
-  styling work. Given this is a learning project and a Slovenian niche
-  audience (low traffic), Leaflet + OpenFreeMap is likely the pragmatic
-  default; Mapbox is worth it if you want polish faster and can accept the
-  free-tier limits.
-- **GraphHopper vs. Valhalla**: GraphHopper's built-in `round_trip`
-  algorithm is a near-perfect fit for "generate a loop from a point" and has
-  a simpler self-hosting story. Valhalla has strong isochrone support but no
-  native round-trip primitive (would need to hand-roll via waypoint
-  sampling). Recommend **GraphHopper** for MVP.
-- **Auth provider**: Better Auth (TS-native, actively maintained) is a
-  reasonable default over rolling your own session logic.
+### Decisions actually made (was "open decisions to make")
+
+- **Map library — decided: MapLibre GL JS + OpenFreeMap**, not Mapbox, and
+  *not* Leaflet as the original draft leaned toward. That original
+  recommendation ("Leaflet + OpenFreeMap") turned out to be internally
+  inconsistent: OpenFreeMap serves vector tiles for a MapLibre/Mapbox-style
+  renderer, which Leaflet can't consume natively without a heavy plugin.
+  MapLibre + OpenFreeMap delivers what "Leaflet + OpenFreeMap" was actually
+  reaching for — free, no token — correctly.
+- **Routing engine — decided: GraphHopper**, as recommended. Its
+  `round_trip` algorithm was the right call for loop generation, but turned
+  out to have a real limitation the original draft didn't anticipate: its
+  direction is completely uncontrollable (`heading` measured to have zero
+  effect). Valhalla wasn't reconsidered — the fix was architectural
+  (a second, guaranteed request type for "must pass near X", §1.3), not a
+  reason to switch engines.
+- **Auth provider — still undecided.** Better Auth remains the reasonable
+  default suggested originally, but Phase 4 hasn't started, so this is a
+  live open question for whoever picks this up next, not a settled choice.
+  Nothing in Phases 0-3 needed auth, which is itself worth confirming was
+  the right call before committing to Better Auth vs. an alternative.

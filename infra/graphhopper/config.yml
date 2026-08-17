@@ -1,0 +1,42 @@
+# GraphHopper server config — local dev instance for the Slovenia extract.
+# Verify this against the installed GraphHopper version's own
+# config-example.yml before relying on it; GraphHopper's config schema
+# occasionally shifts between minor versions.
+
+graphhopper:
+  datareader.file: /data/slovenia-latest.osm.pbf
+  graph.location: /data/graph-cache
+
+  # GraphHopper 9.x replaced "vehicle"/"weighting" with custom models.
+  # custom_model_files: [car.json] pulls in the built-in car custom model
+  # bundled in the jar (core/src/main/resources/com/graphhopper/custom_models).
+  profiles:
+    - name: car
+      custom_model_files: [car.json]
+
+  graph.encoded_values: car_access, car_average_speed
+
+  # Required as of GraphHopper 9.x. We're routing motorized traffic only, so
+  # drop pedestrian/cycle-only ways from the graph.
+  import.osm.ignored_highways: footway,cycleway,path,pedestrian,steps
+  # Add "surface" here (and delete data/graph-cache/ to force a rebuild)
+  # when Phase 3 wires up surface-quality filtering.
+
+  # No profiles_ch / profiles_lm entries on purpose: Contraction Hierarchies
+  # speed up plain point-to-point routing, but the round_trip algorithm
+  # (what "generate a twisty loop from a point" needs) only runs in
+  # flexible/non-CH mode. Skipping CH prep keeps every query flexible-mode
+  # by default instead of needing a per-request "ch.disable" flag. This is
+  # fine for a Slovenia-sized extract on a dev machine; revisit if
+  # point-to-point latency becomes a problem once Valhalla-style caching
+  # or a second CH-prepared profile is worth the added complexity.
+
+server:
+  application_connectors:
+    - type: http
+      port: 8989
+      bind_host: 0.0.0.0
+  admin_connectors:
+    - type: http
+      port: 8990
+      bind_host: 0.0.0.0

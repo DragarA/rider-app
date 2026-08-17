@@ -1,0 +1,34 @@
+services:
+  postgres:
+    image: postgis/postgis:16-3.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-riding_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-riding_app_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-riding_app}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/10-postgis.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-riding_app}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  graphhopper:
+    build: ./infra/graphhopper
+    restart: unless-stopped
+    ports:
+      - "8989:8989"
+    volumes:
+      - ./infra/graphhopper/data:/data
+      - ./infra/graphhopper/config.yml:/graphhopper/config.yml:ro
+    # Requires infra/graphhopper/data/slovenia-latest.osm.pbf — see
+    # infra/graphhopper/README.md for the one-time download step.
+    profiles:
+      - routing
+
+volumes:
+  postgres_data:

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import maplibregl, { type Map as MapLibreMap, type LngLatLike } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import type { Poi, RouteCandidate } from "../lib/api";
+import type { PassConditionSummary, Poi, RouteCandidate } from "../lib/api";
 
 const SLOVENIA_CENTER: LngLatLike = [14.9955, 46.1512];
 const DEFAULT_ZOOM = 8;
@@ -19,6 +19,10 @@ type Props = {
   candidates: RouteCandidate[];
   selectedIndex: number | null;
   pois: Poi[];
+  // Keyed by POI id — only mountain_pass POIs will ever have an entry
+  // (see apps/api/src/lib/passConditions.ts). Optional since most callers
+  // (submit-poi view, moderation view) have no reason to fetch this.
+  poiConditions?: Record<string, PassConditionSummary>;
 };
 
 function candidatesToFeatureCollection(
@@ -35,18 +39,33 @@ function candidatesToFeatureCollection(
   };
 }
 
-function poisToFeatureCollection(pois: Poi[]): GeoJSON.FeatureCollection {
+// Live NAP events (if any) take priority over the manual passClosedInWinter
+// baseline — see passConditions.ts's own comment on why the fallback
+// exists at all (a live signal not correlating to a pass isn't the same
+// as "definitely open").
+function conditionText(summary: PassConditionSummary | undefined): string {
+  if (!summary) return "";
+  if (summary.liveEvents.length > 0) return summary.liveEvents.map((e) => e.title).join("; ");
+  if (summary.passClosedInWinter) return "Closed in winter (seasonal)";
+  return "";
+}
+
+function poisToFeatureCollection(pois: Poi[], poiConditions: Record<string, PassConditionSummary>): GeoJSON.FeatureCollection {
   return {
     type: "FeatureCollection",
     features: pois.map((p) => ({
       type: "Feature",
       geometry: { type: "Point", coordinates: [p.lon, p.lat] },
-      properties: { name: p.name, description: p.description ?? "" },
+      properties: {
+        name: p.name,
+        description: p.description ?? "",
+        condition: conditionText(poiConditions[p.id]),
+      },
     })),
   };
 }
 
-export function MapView({ origin, onPickOrigin, candidates, selectedIndex, pois }: Props) {
+export function MapView({ origin, onPickOrigin, candidates, selectedIndex, pois, poiConditions = {} }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   const markerRef = useRef<maplibregl.Marker | null>(null);
@@ -132,11 +151,19 @@ export function MapView({ origin, onPickOrigin, candidates, selectedIndex, pois 
         const feature = e.features?.[0];
         if (!feature || feature.geometry.type !== "Point") return;
         const [lon, lat] = feature.geometry.coordinates as [number, number];
-        const { name, description } = feature.properties as { name: string; description: string };
+        const { name, description, condition } = feature.properties as {
+          name: string;
+          description: string;
+          condition: string;
+        };
         new maplibregl.Popup()
           .setLngLat([lon, lat])
           .setHTML(
-            `<strong>${name}</strong>${description ? `<br/><span style="font-size:12px">${description}</span>` : ""}`,
+            `<strong>${name}</strong>` +
+              (description ? `<br/><span style="font-size:12px">${description}</span>` : "") +
+              (condition
+                ? `<br/><span style="font-size:12px;color:#b45309">⚠ ${condition}</span>`
+                : ""),
           )
           .addTo(map);
       });
@@ -186,12 +213,12 @@ export function MapView({ origin, onPickOrigin, candidates, selectedIndex, pois 
 
     const apply = () => {
       const poiSource = map.getSource(POIS_SOURCE_ID) as maplibregl.GeoJSONSource | undefined;
-      poiSource?.setData(poisToFeatureCollection(pois));
+      poiSource?.setData(poisToFeatureCollection(pois, poiConditions));
     };
 
     if (loadedRef.current) apply();
     else map.once("load", apply);
-  }, [pois]);
+  }, [pois, poiConditions]);
 
   // Candidate routes.
   useEffect(() => {

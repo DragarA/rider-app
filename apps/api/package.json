@@ -11,22 +11,23 @@
     "test": "tsx --test src/**/*.test.ts"
   },
   "dependencies": {
-    "@riding-app/db": "workspace:*",
-    "drizzle-orm": "^0.36.4",
-    "hono": "^4.6.14",
-    "@hono/node-server": "^1.13.7",
-    "@hono/zod-validator": "^0.4.1",
-    "@turf/turf": "^7.1.0",
-    "ai": "^7.0.66",
     "@ai-sdk/anthropic": "^4.0.39",
     "@ai-sdk/openai": "^4.0.42",
+    "@hono/node-server": "^1.13.7",
+    "@hono/zod-validator": "^0.4.1",
     "@openrouter/ai-sdk-provider": "^3.0.0",
+    "@riding-app/db": "workspace:*",
+    "@turf/turf": "^7.1.0",
+    "ai": "^7.0.66",
+    "better-auth": "^1.6.29",
+    "drizzle-orm": "^0.45.2",
+    "hono": "^4.6.14",
     "zod": "^3.25.76"
   },
   "devDependencies": {
-    "tsx": "^4.19.2",
-    "typescript": "^5.7.2",
+    "@types/geojson": "^7946.0.15",
     "@types/node": "^22.10.2",
-    "@types/geojson": "^7946.0.15"
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
   }
 }

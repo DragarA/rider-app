@@ -1,7 +1,9 @@
 # Slovenian Ride Planner — Project Spec
 
-Status: **Phases 0-3 implemented and verified live** (Phase 3.5 bug-fix
-round included). Phase 4 (save/rate/share, needs auth) not started. This
+Status: **Phases 0-5 implemented** (Phase 3.5 bug-fix round included).
+Phase 5's POI contribution/moderation half is verified live; its
+mountain-pass-conditions half is code-complete and unit-tested but **not**
+verified against real data — see §0.1 below for exactly why. This
 document has been updated to describe what was actually built, not just
 the original plan — where reality diverged from the plan below, that's
 called out inline. For the detailed build diary (bugs found, root causes,
@@ -16,6 +18,18 @@ architecture reference.
 - The AI layer resolves place names via a real 225-entry Slovenian gazetteer (all 212 municipalities + hand-picked passes/regions), provider-agnostic across Anthropic/OpenAI/OpenRouter.
 - "Pass near place X" is handled by a guaranteed deterministic waypoint route alongside random `round_trip` attempts, not by hoping a random loop gets lucky.
 - 8 real biker cafés (user-curated, geocoded against OpenStreetMap) plus passes/viewpoints are seeded and always visible on the map.
+- Email+password auth (Better Auth), saving a generated candidate as a persisted route, `private`/`unlisted`/`public` visibility, a "My Routes" + anonymous "Public" browse view, GPX export for saved routes, and 1–5 star scenic/surface/fun ratings with a comment all work end-to-end.
+- Community POI submission (`POST /pois`, unverified by default), an
+  email-allowlist admin/moderation queue (approve/reject), and ownership-
+  gated edit/delete all work end-to-end. Two curated `mountain_pass` POIs
+  (Vršič, Mangart) are seeded and show a live/manual condition badge on
+  the map when clicked.
+- **Not verified live**: `GET /conditions/passes`' NAP (nap.si) client is
+  real code against real, curl-confirmed endpoints, but has never
+  successfully authenticated — the user's NAP dataset access/credentials
+  weren't ready yet this session. It degrades to `{configured: false}` and
+  the manual `passClosedInWinter` flag until that's resolved (see the NAP
+  bullet below).
 
 **Key deviations from the original plan below**, decided during implementation (see §5 "Decisions actually made" for the reasoning):
 - Map: **MapLibre GL JS + OpenFreeMap**, not Mapbox or Leaflet — OpenFreeMap serves vector tiles for a MapLibre/Mapbox-style renderer, which Leaflet can't consume natively, so "Leaflet + OpenFreeMap" (the original recommendation) was never actually viable.
@@ -23,7 +37,30 @@ architecture reference.
 - AI extraction uses `generateText` + `output: Output.object(...)`, not `generateObject` — the latter is deprecated in the AI SDK version this project ended up on. Grounding (`lookupPlace`) is plain backend code calling the gazetteer directly, not a tool the model invokes.
 - Provider list grew to three: Anthropic, OpenAI, **and OpenRouter** (added for cheap local-dev iteration against multiple model backends through one key).
 - Two extra tables beyond the original five: `places` (gazetteer) and `road_segments` (non-paved surface cache) — both were always implied by the design but not spec'd in §2 originally.
-- No auth yet — Phase 4 needs it and hasn't started, so every route lives in-memory per request; nothing persists to `routes`/`waypoints`/`route_ratings` yet even though those tables exist in the schema.
+- Auth: **Better Auth**, email+password only for now, decided in Phase 4 (§5 "Decisions actually made" has the reasoning). It reuses the app's own `users` table (field-mapped, not a parallel table) and adds three more tables it requires (`sessions`, `accounts`, `verifications`) — nine tables total, not seven. `waypoints` is still unused: saving a candidate persists its geometry directly, not a decomposed start/via/end sequence, since generation doesn't produce named waypoints beyond raw geometry.
+- Admin/moderation (Phase 5): no role table — an "admin" is just an email
+  on the `ADMIN_EMAILS` env var, checked by a `requireAdmin` middleware.
+  Chosen over a real role system as the simplest mechanism that solves the
+  actual need (a handful of trusted moderators), same bias as `requireAuth`
+  itself in Phase 4.
+- Mountain-pass data source (Phase 5): the spec originally said "a public
+  SI roads API" without naming one. Two real candidates were investigated
+  live this session — promet.si's own B2B portal (DATEX II/GeoJSON,
+  requires a "MOJ PIC" account + emailing `info@promet.si`) and **NAP
+  (nap.si)**, Slovenia's EU-mandated National Access Point, which the user
+  registered on mid-session and which turned out to be the better channel:
+  same publisher (DARS/PIC) via a proper self-service dataset-request flow
+  and a standard OAuth2 API. **Decided: NAP.** Its token endpoint
+  (`POST https://b2b.nap.si/uc/user/token`) and data endpoints
+  (`GET https://b2b.nap.si/data/b2b.events.geojson.en_US`,
+  `b2b.roadworks.geojson.en_US`) are confirmed real via curl (401/400 with
+  the expected OAuth2 error shapes when unauthenticated) — but dataset
+  approval and a working `client_id`/credentials weren't in hand by the
+  end of this session, so the integration is code-complete and
+  unit-tested against a hand-built fixture, **not verified against real
+  NAP data**. See `apps/api/src/lib/napClient.ts`'s file header for the
+  exact unconfirmed details (whether `NAP_CLIENT_SECRET` is required; the
+  real GeoJSON property names).
 
 **Real bugs found via live testing that are worth knowing about before extending this further** (full detail in `README.md`):
 1. A GraphHopper spatial query cast an indexed geometry column to `geography`, silently defeating the GiST index — 43.7s per surface-quality query, down to ~350ms after adding a bbox prefilter.
@@ -32,6 +69,11 @@ architecture reference.
 4. The original hand-typed ~30-place gazetteer was missing real towns and had a similarity threshold low enough to confidently return the *wrong* town instead of "not found."
 5. One gazetteer coordinate (Rakitna) was flat-out wrong — hand-typed from memory back in Phase 0 and never verified like the rest of the gazetteer, off by ~12.6km. Every earlier demo involving Rakitna was quietly routing to the wrong place.
 6. A MapLibre symbol layer with no explicit `text-font` 404'd against the style's font endpoint and silently dropped labels.
+7. (Phase 4) `POST /routes` 500'd on every real candidate: `distanceMeters`/`estDurationSeconds` from the routing engine are floats (e.g. `59338.921`), but `routes.distance_meters`/`est_duration_seconds` are `integer` columns — fixed by rounding both before insert.
+8. (Phase 4) Better Auth's client threw `Invalid base URL` at import time with a relative `baseURL` (`"/api/v1/auth"`) — unlike this app's own plain `fetch()` calls, which happily use relative paths through the Vite proxy, Better Auth's client requires an absolute URL. Fixed by resolving against `window.location.origin` at runtime instead of hardcoding a host.
+9. (Phase 4) The first cut gated the entire "My Routes" view (including the anonymous-accessible "Public" tab) behind being signed in, since the view toggle lived inside the sign-in-only branch of the header widget — found via live browser testing (a signed-out session had no way to reach Public browsing at all). Fixed by moving the view toggle out of the auth widget into the header directly, always visible regardless of session state.
+10. (Phase 5) `GET /pois?category=X` 500'd with `malformed array literal` — a **pre-existing bug from Phase 3**, never exercised live before (the frontend only ever calls `GET /pois` with zero filters). Root cause: `p.category = ANY(${filters.categories})` passes a JS array as a single Drizzle `sql` parameter, which loses its "array" type on the wire, so postgres.js's driver receives a bare string. Fixed with an OR-chain of plain equality checks instead of `ANY()`, sidestepping the array-binding question entirely (`apps/api/src/lib/pois.ts`).
+11. (Phase 5, caught during implementation, not live testing) The initial `GET /pois` default (no `verified` filter → no filter applied) would have shown a brand-new *unverified* community submission on the public map immediately, before any moderation — defeating the entire point of Phase 5's moderation queue. Caught by re-reading the actual data flow before wiring the frontend, not by a bug report: fixed by having the frontend's `fetchAllPois()` request `verified=true` explicitly rather than relying on the (intentionally permissive, for other API consumers) unfiltered default.
 
 ## 0. Product Summary
 
@@ -68,9 +110,10 @@ Updated to match what's actually running (see §0.1 for the deviations):
                                    │  TypeScript                │
                                    ├────────────────────────┤
                                    │  /routes/generate  /routes/gpx │
+                                   │  /routes (CRUD) /routes/:id/ratings │
                                    │  /ai/generate (SSE)             │
                                    │  /places/search  /pois           │
-                                   │  (/auth /ratings — Phase 4, TBD)  │
+                                   │  /auth/* (Better Auth handler)    │
                                    └──┬───────┬───────┬───────┘
                                       │       │       │
                     ┌─────────────────┘       │       └───────────────────┐
@@ -92,21 +135,24 @@ Updated to match what's actually running (see §0.1 for the deviations):
                                    │   places (gazetteer, 225 rows)│
                                    │   road_segments (140k rows)    │
                                    │   pois (13 rows)                │
-                                   │   users/routes/waypoints/        │
-                                   │   route_ratings (schema exists,  │
-                                   │   unused — no auth, Phase 4)      │
+                                   │   users/routes/route_ratings (live)│
+                                   │   sessions/accounts/verifications │
+                                   │   (Better Auth) · waypoints unused │
                                    └────────────────────────────┘
 ```
 
 ### 1.2 Component responsibilities
 
 - **React SPA (Vite)**: map rendering, route-request form + prompt box, GPX
-  download, an "Open in Google Maps" preview link. Talks only to the Hono
-  API — never directly to GraphHopper or the DB. Route/POI browsing and
-  ratings UI don't exist yet (Phase 4/5).
+  download, an "Open in Google Maps" preview link, sign-in/up/out, saving a
+  candidate, and a "My Routes"/"Public" browsing + rating view. Talks only
+  to the Hono API — never directly to GraphHopper or the DB. POI
+  contribution UI still doesn't exist (Phase 5).
 - **Hono API**: single TypeScript backend. Owns validation (Zod) and
   orchestration between the AI extraction layer, GraphHopper, and PostGIS.
-  No auth yet — every request is anonymous.
+  Auth (Better Auth) gates the write side of the saved-routes/ratings API;
+  everything else (candidate generation, POI/gazetteer lookups, public
+  route browsing) stays anonymous by design.
 - **AI extraction layer (Vercel AI SDK Core)**: a thin module inside the Hono
   process (`apps/api/src/lib/ai/`), not a standalone service. Given a
   natural-language prompt, produces a structured draft constraints object via
@@ -124,9 +170,11 @@ Updated to match what's actually running (see §0.1 for the deviations):
   specific place to pass near. The Hono API is a client of this service — it
   does not reimplement routing.
 - **PostGIS**: source of truth for curated data — the 225-place gazetteer,
-  the 140k-row non-paved `road_segments` cache, and the 13-row `pois` table.
-  Route/waypoint/rating persistence tables exist in the schema but are
-  unused (no save flow yet — Phase 4).
+  the 140k-row non-paved `road_segments` cache, and the 13-row `pois` table
+  — plus, as of Phase 4, live `users`/`routes`/`route_ratings` and Better
+  Auth's `sessions`/`accounts`/`verifications`. `waypoints` remains unused:
+  saving a candidate persists its geometry directly, not a decomposed
+  start/via/end sequence.
 - **Data services layer (weather, pass conditions)**: not built. Still
   planned for Phase 5's mountain-pass condition integration; nothing today
   calls promet.si/AMZS/Open-Meteo.
@@ -351,16 +399,33 @@ this file:
   was self-contradictory in the original draft).
 - Enums grew: `placeKindEnum`, `waypointKindEnum`, and
   `roadSurfaceCategoryEnum` were added alongside the original three.
-- None of `users`, `routes`, `waypoints`, `route_ratings` have any real data
-  yet — they exist and migrate cleanly, but nothing writes to them until
-  Phase 4 adds auth and a save flow.
+- `users`, `routes`, and `route_ratings` are live as of Phase 4. `waypoints`
+  is still unused — saving a candidate persists its geometry directly, not
+  a decomposed start/via/end sequence, since generation doesn't produce
+  named waypoints beyond raw geometry (a deliberate scope call, not an
+  oversight).
+- **Three tables beyond the resulting seven, all added for Better Auth**
+  (`packages/db/src/schema.ts`, `apps/api/src/lib/auth.ts`): `sessions`,
+  `accounts`, `verifications`. Better Auth binds directly onto the existing
+  `users` table (`usePlural: true` + a `name`→`displayName` field mapping)
+  rather than getting a parallel table of its own — `users` also gained
+  `emailVerified`/`image`/`updatedAt` columns Better Auth's core schema
+  requires, even though the app itself doesn't use them yet.
+- **One more table for Phase 5**: `pass_conditions` — a server-side cache
+  of events fetched from NAP (see §0.1/§5), keyed by NAP's own event id
+  (not generated here, so a refetch naturally upserts). Ten tables total.
+  `pois.createdById`/`pois.verified` (both already in the original design)
+  turned out to be exactly what community submission + moderation needed —
+  no schema change for that half of Phase 5 at all.
 
 ---
 
 ## 3. API Contract (REST, Hono)
 
-Base path: `/api/v1`. **No auth exists yet** — every endpoint is anonymous
-today; session cookie / bearer token auth is still Phase 4 scope.
+Base path: `/api/v1`. Most endpoints stay anonymous (candidate generation,
+POI/gazetteer lookups, public route browsing); the write side of the saved-
+routes/ratings API (§3.1) requires a Better Auth session cookie, checked via
+the `requireAuth` Hono middleware (`apps/api/src/lib/auth-middleware.ts`).
 
 ### 3.1 Implemented and verified live
 
@@ -396,33 +461,83 @@ GET    /api/v1/places/search?q=Rakitna
   # the frontend — the origin picker is still map-click only).
 
 GET    /api/v1/pois
-  Query: ?bbox=minLon,minLat,maxLon,maxLat  &near=lon,lat&radiusKm=  &category=biker_cafe,...  &bikerFriendly=true  &verified=true
+  Query: ?bbox=minLon,minLat,maxLon,maxLat  &near=lon,lat&radiusKm=  &category=biker_cafe,...  &bikerFriendly=true  &verified=true  &mine=true (auth required)
   Response: { pois: Poi[] }
-  # All filters combine with AND. Frontend currently calls this with no
-  # filters on load to always show every POI on the map (see §1.3 of the
-  # README for why "only show POIs near the selected route" was a UX bug).
-```
+  # All filters combine with AND. `verified=false` (the moderation queue)
+  # 403s for non-admins (Phase 5) — every other combination, including no
+  # `verified` filter at all, is unchanged since Phase 3. The frontend's
+  # own default map view calls this with verified=true explicitly (not by
+  # relying on the permissive unfiltered default — see §0.1 bug #11).
 
-### 3.2 Planned, not built (Phase 4/5)
-
-```
-GET    /api/v1/routes                       # list saved routes
-GET    /api/v1/routes/:id                   # route detail + waypoints + ratings
-POST   /api/v1/routes                       # save a generated candidate
-PATCH  /api/v1/routes/:id
-DELETE /api/v1/routes/:id
-GET    /api/v1/routes/:id/gpx               # GPX for a *saved* route (vs. the ad-hoc POST above)
+POST   /api/v1/pois                         (auth required, Phase 5)
+  Body: { name, category, lat, lon, description?, isBikerFriendly?, metadata? }
+  Response: 201 { poi: Poi }, verified: false always, regardless of who submits it.
 
 GET    /api/v1/pois/:id
-POST   /api/v1/pois                         # community submission, verified=false until moderated
-PATCH  /api/v1/pois/:id
-DELETE /api/v1/pois/:id
+PATCH  /api/v1/pois/:id                     (creator or admin)
+DELETE /api/v1/pois/:id                     (creator or admin)
 
-POST   /api/v1/routes/:id/ratings
+POST   /api/v1/pois/:id/verify              (admin only)
+  Body: { verified: boolean }
+  # The moderation decision — separate from PATCH, same "action endpoint"
+  # pattern as POST /routes/:id/ratings.
+
+GET    /api/v1/admin/status
+  Response: { isAdmin: boolean }
+  # Lets the frontend decide whether to show admin-only nav links without
+  # duplicating the ADMIN_EMAILS check client-side. The real moderation
+  # endpoints enforce requireAdmin themselves regardless of this.
+
+GET    /api/v1/conditions/passes
+  Response: { configured: boolean, passes: PassConditionSummary[] }
+  # Public, no auth. `configured: false` (today's real state — see §0.1)
+  # means no NAP credentials are set; passes still returns the manual
+  # passClosedInWinter baseline per mountain_pass POI. See §5 Phase 5 and
+  # apps/api/src/lib/{napClient,passConditions}.ts.
+
+POST   /api/v1/auth/sign-up/email  |  /sign-in/email  |  /sign-out  |  GET /get-session  (+ more)
+  # Better Auth's own handler, mounted at /api/v1/auth/* (apps/api/src/lib/auth.ts,
+  # index.ts). Not hand-written — this app only configures Better Auth and
+  # consumes its session cookie via requireAuth (auth-middleware.ts).
+
+POST   /api/v1/routes                       (auth required)
+  Body: { title, description?, geometry, distanceMeters, estDurationSeconds,
+          curvinessScore?, surfaceBreakdown?, visibility?, generatedFromPrompt? }
+  Response: 201 { route: SavedRoute }
+  # Saves a generated candidate. surfaceBreakdown's 3-key
+  # {gravel,cobblestone,asphalt} maps onto the DB's 5-key surfaceTypeEnum —
+  # see mapSurfaceBreakdownToDb in lib/savedRoutes.ts for why that's a real,
+  # deliberate lossy conversion (OSM's surface tag has no condition data).
+
+GET    /api/v1/routes                       ?mine=true (auth required) | public browse otherwise
+  Query (public browse): ?near=lon,lat&radiusKm=  &maxDurationMinutes=
+  Response: { routes: SavedRoute[] }
+
+GET    /api/v1/routes/:id                   # visibility-gated: public → anyone,
+                                             # unlisted → anyone with the id,
+                                             # private → owner only (404 otherwise)
+  Response: { route: SavedRoute, ratingSummary: RatingSummary }
+
+PATCH  /api/v1/routes/:id                   (auth required, owner only)
+DELETE /api/v1/routes/:id                   (auth required, owner only)
+
+GET    /api/v1/routes/:id/gpx               # GPX for a *saved* route (vs. the ad-hoc POST above),
+                                             # same visibility gate as GET /routes/:id
+
+POST   /api/v1/routes/:id/ratings           (auth required)
+  Body: { scenicScore, surfaceScore, funScore (1-5 each), comment?, riddenAt? }
+  Response: 201 { ratingSummary: RatingSummary }
+  # Upserts on route_ratings' existing (route_id, user_id) unique constraint.
+
 GET    /api/v1/routes/:id/ratings
-
-GET    /api/v1/conditions/passes            # mountain-pass status, Phase 5
+  Response: { ratings: Rating[], summary: RatingSummary }
 ```
+
+### 3.2 Planned, not built (Phase 6+)
+
+Nothing currently — every endpoint originally planned through Phase 5 has
+shipped (§3.1). Future candidates would come from a Phase 6, not yet
+scoped.
 
 ### 3.3 Shared types (as actually implemented — `apps/api/src/schemas/constraints.ts`)
 
@@ -638,20 +753,72 @@ noting as a pattern: every one of these was invisible to typechecking,
 unit tests, or API-level curl testing, and only surfaced by generating
 real routes and looking at the map.
 
-### ⬜ Phase 4 — Save, rate, share (community layer) — NOT STARTED
-- `POST /routes` (save a generated candidate), user's "My Routes" list.
-- Route detail page with `visibility` (private/unlisted/public).
-- Ratings endpoints + UI (scenic/surface/fun scores + comment).
-- Public route browsing (`GET /routes?visibility=public`) with basic
-  filters (near me, duration).
-- **Needs auth first** — nothing in Phase 0-3 required it, so it's still an
-  open question, not just an implementation task (see "Open decisions" below).
+### ✅ Phase 4 — Save, rate, share (community layer) — DONE
+- Auth: **Better Auth**, email+password only, wired directly onto the
+  app's existing `users` table (`apps/api/src/lib/auth.ts` maps Better
+  Auth's `name` field onto `displayName` rather than adding a redundant
+  column) plus three new tables it requires (`sessions`, `accounts`,
+  `verifications`). Session cookie, `requireAuth` Hono middleware
+  (`apps/api/src/lib/auth-middleware.ts`).
+- `POST /routes` (save a generated candidate — geometry, distance,
+  duration, curviness, surface breakdown, optional prompt/constraints),
+  `GET /routes` (`?mine=true` for the caller's own at any visibility, or
+  public browsing with `near=lon,lat&radiusKm=`/`maxDurationMinutes=`
+  filters), `GET /routes/:id`, `PATCH /routes/:id`, `DELETE /routes/:id`
+  (`apps/api/src/routes/saved-routes.ts`, backed by
+  `apps/api/src/lib/savedRoutes.ts` — same raw-`sql` +
+  `ST_GeomFromGeoJSON`/`ST_AsGeoJSON` pattern already used by `lib/pois.ts`,
+  not Drizzle's query builder, for consistency with the rest of this
+  codebase).
+- `visibility` (private/unlisted/public) gating: `public` → anyone;
+  `unlisted` → anyone with the id (no owner check, by design); `private` →
+  owner only, 404 (not 403) for everyone else to avoid confirming a private
+  route's existence.
+- `GET /routes/:id/gpx` for a saved route (reuses `buildGpx` from
+  `lib/gpx.ts`, same as the Phase 1 ad-hoc `POST /routes/gpx`).
+- `POST /routes/:id/ratings` (upserts on the existing
+  `route_ratings_route_user_unique` constraint) + `GET /routes/:id/ratings`,
+  both with an aggregate scenic/surface/fun average.
+- Frontend: `AuthPanel` (sign in/up/out) and an always-visible "My
+  Routes"/"Back to planner" header toggle (deliberately *not* gated behind
+  being signed in — a live bug found in testing, see §0.1 bug #9), a "Save
+  route" button + inline title/visibility form on the selected candidate in
+  `CandidateList`, and `MyRoutesPanel` (Mine/Public tabs, view-on-map,
+  download GPX, owner-only delete/visibility edit, star rating widget). No
+  new routing or state-management library — still plain `useState`, no
+  router, matching every earlier phase's frontend.
+- **Milestone met**: verified live in a real browser (Playwright-driven
+  Chromium, not just curl/typecheck) — sign-up, sign-in, save, list, view
+  on map, rate, change visibility, sign out, and anonymous public viewing
+  all confirmed end-to-end, plus the three bugs in §0.1 (#7-9) were each
+  found this way.
 
-### ⬜ Phase 5 — Community POI contribution + moderation — NOT STARTED
-- `POST /pois` from users (unverified by default).
-- Minimal admin/moderation view to verify submitted POIs.
-- Mountain pass condition integration (`/conditions/passes`) sourced from a
-  public SI roads API, cached server-side with a scheduled refresh.
+### 🟡 Phase 5 — Community POI contribution + moderation — POI half DONE, pass-conditions half code-complete but unverified
+- `POST /pois` from users (unverified by default), `PATCH`/`DELETE`
+  (creator or admin), `POST /pois/:id/verify` (admin only) — all via
+  `apps/api/src/routes/pois.ts` + `lib/pois.ts`.
+- Admin/moderation: `ADMIN_EMAILS` env-var allowlist (no role table —
+  see §5 "Decisions actually made"), `requireAdmin` middleware, a
+  `ModeratePoisPanel` frontend view reachable from a "Moderate POIs" header
+  link shown only when `GET /admin/status` says so.
+- Mountain-pass condition integration: real client
+  (`apps/api/src/lib/napClient.ts`) against NAP (nap.si)'s confirmed-live
+  OAuth2 token endpoint and GeoJSON data endpoints (§0.1), cache-aside
+  orchestration (`lib/passConditions.ts`, 15-minute TTL — this stack has no
+  cron/worker process, so "scheduled refresh" from the original plan is
+  implemented as "cached with a max age" instead), and
+  `GET /conditions/passes`. Two `mountain_pass` POIs seeded (Vršič,
+  Mangart) with a manual `passClosedInWinter` baseline as the fallback
+  when no live signal correlates. **Not live-verified** — no working NAP
+  credentials by the end of this session; degrades to
+  `{configured: false}` and the manual flag until that's resolved.
+- **Milestone met (POI half only)**: verified live in a real browser
+  (Playwright-driven Chromium) — submit as one user, confirm it's not on
+  the public map yet, moderate-approve as an admin user, confirm it now
+  is. Also verified: non-admins get 403 from the moderation queue and
+  verify endpoint; a stranger gets 403 editing/deleting someone else's
+  POI; the owner can still edit their own. Two real bugs found this way,
+  documented in §0.1 (#10, #11).
 
 ### Explicitly out of scope for MVP (avoid over-engineering)
 - Turn-by-turn live navigation in-app (GPX export to existing GPS apps
@@ -681,8 +848,10 @@ real routes and looking at the map.
   effect). Valhalla wasn't reconsidered — the fix was architectural
   (a second, guaranteed request type for "must pass near X", §1.3), not a
   reason to switch engines.
-- **Auth provider — still undecided.** Better Auth remains the reasonable
-  default suggested originally, but Phase 4 hasn't started, so this is a
-  live open question for whoever picks this up next, not a settled choice.
-  Nothing in Phases 0-3 needed auth, which is itself worth confirming was
-  the right call before committing to Better Auth vs. an alternative.
+- **Auth provider — decided: Better Auth**, email+password only for now
+  (no OAuth providers yet). Chosen for being self-hosted and
+  framework-agnostic — no external account/service dependency for local
+  dev, unlike a hosted auth-as-a-service option — and its Drizzle adapter
+  binds directly onto this app's existing `users` table (via `usePlural:
+  true` and a `name`→`displayName` field mapping) rather than requiring a
+  parallel user table. See §5 Phase 4 for what shipped.

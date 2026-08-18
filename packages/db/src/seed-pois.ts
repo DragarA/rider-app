@@ -75,6 +75,18 @@ async function nominatimSearch(query: string): Promise<{ lat: number; lon: numbe
 
 type Row = { name: string; town: string; description: string; url: string };
 
+// Curated mountain_pass POIs (Phase 5) — reuses the exact coordinates
+// already verified in the `places` gazetteer (seed.ts) rather than
+// re-guessing them (see the Rakitna coordinate bug from Phase 3.5:
+// verify once, reuse everywhere, don't hand-type the same place twice).
+// passClosedInWinter is a real, well-known fact for both, and is the
+// fallback baseline `apps/api/src/lib/passConditions.ts` uses whenever a
+// live NAP signal doesn't correlate to the pass.
+const MOUNTAIN_PASS_POIS = [
+  { name: "Vršič", lat: 46.4331, lon: 13.7478 },
+  { name: "Mangart", lat: 46.4389, lon: 13.6122 },
+];
+
 // biker_cafes.csv's descriptive names ("Gostilna in Pizzerija Grof") don't
 // always match how OSM tags the place ("GROF"). Verified by hand for these
 // two — searching the alias directly finds the real business/landmark
@@ -107,6 +119,21 @@ async function main() {
   // to run against a referenced table without CASCADE. pois stays tiny, so
   // DELETE's lack of a fast-path doesn't matter here.
   await db.execute(sql`DELETE FROM pois`);
+
+  console.log(`Seeding ${MOUNTAIN_PASS_POIS.length} mountain passes…`);
+  for (const pass of MOUNTAIN_PASS_POIS) {
+    await db.execute(sql`
+      INSERT INTO pois (name, category, geom, is_biker_friendly, verified, metadata)
+      VALUES (
+        ${pass.name},
+        'mountain_pass',
+        ST_SetSRID(ST_MakePoint(${pass.lon}, ${pass.lat}), 4326),
+        true,
+        true,
+        ${JSON.stringify({ passClosedInWinter: true })}::jsonb
+      )
+    `);
+  }
 
   let inserted = 0;
   let skipped = 0;

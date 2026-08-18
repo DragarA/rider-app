@@ -49,10 +49,16 @@ export const roadSurfaceCategoryEnum = pgEnum("road_surface_category", [
 ]);
 
 // --- Users -------------------------------------------------------------
+// Doubles as Better Auth's "user" table (apps/api/src/lib/auth.ts maps
+// Better Auth's `name` field onto `displayName` rather than adding a
+// redundant column) — emailVerified/image/updatedAt below exist only
+// because Better Auth's core schema requires them, not for app logic.
 export const users = pgTable("users", {
   id: uuid("id").primaryKey().defaultRandom(),
   email: varchar("email", { length: 255 }).notNull().unique(),
   displayName: varchar("display_name", { length: 100 }).notNull(),
+  emailVerified: boolean("email_verified").default(false).notNull(),
+  image: text("image"),
   homeBaseGeom: geometry("home_base_geom", { type: "Point" }),
   preferences: jsonb("preferences").$type<{
     defaultSurfacePref?: "asphalt_only" | "asphalt_preferred" | "any";
@@ -60,6 +66,55 @@ export const users = pgTable("users", {
     unitSystem?: "metric" | "imperial";
   }>(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+// --- Better Auth session/account/verification tables ---------------------
+// Standard Better Auth Drizzle-adapter shape (see auth.ts) — sessions are
+// server-side session records keyed by an opaque bearer token in a cookie;
+// accounts holds the scrypt password hash for the "credential" provider
+// (email+password) and would hold OAuth tokens if a provider were added
+// later; verifications backs email-verification/password-reset flows (not
+// exposed in the UI yet, but the table is part of Better Auth's core
+// schema regardless of which flows are enabled).
+export const sessions = pgTable("sessions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  token: varchar("token", { length: 255 }).notNull().unique(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  ipAddress: varchar("ip_address", { length: 45 }),
+  userAgent: text("user_agent"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("sessions_user_idx").on(t.userId),
+]);
+
+export const accounts = pgTable("accounts", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  accountId: varchar("account_id", { length: 255 }).notNull(),
+  providerId: varchar("provider_id", { length: 50 }).notNull(),
+  password: text("password"),
+  accessToken: text("access_token"),
+  refreshToken: text("refresh_token"),
+  idToken: text("id_token"),
+  accessTokenExpiresAt: timestamp("access_token_expires_at", { withTimezone: true }),
+  refreshTokenExpiresAt: timestamp("refresh_token_expires_at", { withTimezone: true }),
+  scope: text("scope"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("accounts_user_idx").on(t.userId),
+]);
+
+export const verifications = pgTable("verifications", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  identifier: varchar("identifier", { length: 255 }).notNull(),
+  value: text("value").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
 // --- Routes --------------------------------------------------------------
@@ -180,11 +235,40 @@ export const roadSegments = pgTable("road_segments", {
   index("road_segments_geom_gist_idx").using("gist", t.geom),
 ]);
 
+// --- Pass conditions (NAP cache) -------------------------------------------
+// Server-side cache of events fetched from NAP (nap.si, Slovenia's
+// National Access Point for transport data) — see apps/api/src/lib/
+// napClient.ts. `id` is NAP's own event id, not generated here, so a
+// refetch naturally upserts instead of duplicating. Only ever holds
+// events near a mountain_pass POI (see passConditions.ts) — this is a
+// correlation cache, not a general-purpose traffic-events mirror.
+export const passConditions = pgTable("pass_conditions", {
+  id: text("id").primaryKey(),
+  title: varchar("title", { length: 255 }).notNull(),
+  description: text("description"),
+  category: varchar("category", { length: 50 }).notNull(),
+  geom: geometry("geom", { type: "Point" }).notNull(),
+  raw: jsonb("raw"),
+  fetchedAt: timestamp("fetched_at", { withTimezone: true }).defaultNow().notNull(),
+}, (t) => [
+  index("pass_conditions_geom_gist_idx").using("gist", t.geom),
+]);
+
 // --- Relations -----------------------------------------------------------
 export const usersRelations = relations(users, ({ many }) => ({
   routes: many(routes),
   ratings: many(routeRatings),
   pois: many(pois),
+  sessions: many(sessions),
+  accounts: many(accounts),
+}));
+
+export const sessionsRelations = relations(sessions, ({ one }) => ({
+  user: one(users, { fields: [sessions.userId], references: [users.id] }),
+}));
+
+export const accountsRelations = relations(accounts, ({ one }) => ({
+  user: one(users, { fields: [accounts.userId], references: [users.id] }),
 }));
 
 export const routesRelations = relations(routes, ({ one, many }) => ({

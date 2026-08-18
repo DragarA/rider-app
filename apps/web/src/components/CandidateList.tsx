@@ -1,12 +1,105 @@
-import type { RouteCandidate } from "../lib/api";
-import { downloadGpx } from "../lib/api";
+import { useState } from "react";
+import type { RouteCandidate, RouteVisibility } from "../lib/api";
+import { downloadGpx, saveRoute } from "../lib/api";
 import { openInGoogleMaps } from "../lib/googleMaps";
+import { useSession } from "../lib/authClient";
 
 type Props = {
   candidates: RouteCandidate[];
   selectedIndex: number | null;
   onSelect: (index: number) => void;
 };
+
+function SaveRouteForm({ candidate, index }: { candidate: RouteCandidate; index: number }) {
+  const { data: session } = useSession();
+  const [open, setOpen] = useState(false);
+  const [title, setTitle] = useState(`Route ${index + 1}`);
+  const [visibility, setVisibility] = useState<RouteVisibility>("private");
+  const [saving, setSaving] = useState(false);
+  const [savedId, setSavedId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!session?.user) {
+    return (
+      <button
+        type="button"
+        disabled
+        title="Sign in to save routes"
+        className="flex-1 rounded border border-neutral-200 px-3 py-1.5 text-xs font-medium text-neutral-400"
+      >
+        Save route
+      </button>
+    );
+  }
+
+  if (savedId) {
+    return <p className="flex-1 text-center text-xs font-medium text-emerald-700">Saved to My Routes</p>;
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="flex-1 rounded border border-neutral-300 px-3 py-1.5 text-xs font-medium hover:bg-neutral-50"
+      >
+        Save route
+      </button>
+    );
+  }
+
+  async function handleSave() {
+    setSaving(true);
+    setError(null);
+    try {
+      const saved = await saveRoute(candidate, { title, visibility });
+      setSavedId(saved.id);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="flex w-full flex-col gap-1.5 rounded border border-neutral-200 p-2">
+      <input
+        type="text"
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        placeholder="Route title"
+        className="rounded border border-neutral-300 px-2 py-1 text-xs"
+      />
+      <select
+        value={visibility}
+        onChange={(e) => setVisibility(e.target.value as RouteVisibility)}
+        className="rounded border border-neutral-300 px-2 py-1 text-xs"
+      >
+        <option value="private">Private</option>
+        <option value="unlisted">Unlisted (link only)</option>
+        <option value="public">Public</option>
+      </select>
+      {error && <p className="text-xs text-red-600">{error}</p>}
+      <div className="flex gap-2">
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={saving || title.trim().length === 0}
+          className="flex-1 rounded bg-neutral-900 px-2 py-1 text-xs font-medium text-white hover:bg-neutral-800 disabled:opacity-50"
+        >
+          {saving ? "Saving…" : "Confirm"}
+        </button>
+        <button
+          type="button"
+          onClick={() => setOpen(false)}
+          className="rounded border border-neutral-300 px-2 py-1 text-xs hover:bg-neutral-50"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function formatDuration(seconds: number): string {
   // Round to whole minutes first, then split — rounding h/m separately can
@@ -73,21 +166,24 @@ export function CandidateList({ candidates, selectedIndex, onSelect }: Props) {
                 )}
               </button>
               {selected && (
-                <div className="mt-1 flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => downloadGpx(`Route ${i + 1}`, c.geometry)}
-                    className="flex-1 rounded border border-neutral-300 px-3 py-1.5 text-xs font-medium hover:bg-neutral-50"
-                  >
-                    Download GPX
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => openInGoogleMaps(c.geometry)}
-                    className="flex-1 rounded border border-neutral-300 px-3 py-1.5 text-xs font-medium hover:bg-neutral-50"
-                  >
-                    Open in Google Maps
-                  </button>
+                <div className="mt-1 flex flex-col gap-2">
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => downloadGpx(`Route ${i + 1}`, c.geometry)}
+                      className="flex-1 rounded border border-neutral-300 px-3 py-1.5 text-xs font-medium hover:bg-neutral-50"
+                    >
+                      Download GPX
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openInGoogleMaps(c.geometry)}
+                      className="flex-1 rounded border border-neutral-300 px-3 py-1.5 text-xs font-medium hover:bg-neutral-50"
+                    >
+                      Open in Google Maps
+                    </button>
+                  </div>
+                  <SaveRouteForm candidate={c} index={i} />
                 </div>
               )}
             </li>

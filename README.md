@@ -17,7 +17,7 @@ model, API contract, AI integration strategy, and MVP roadmap.
   note this is MapLibre, not Leaflet: OpenFreeMap serves vector tiles for a
   MapLibre/Mapbox-style renderer, which Leaflet doesn't consume natively
 - AI provider: provider-agnostic via the AI SDK — concrete model chosen per-request via `AI_PROVIDER`
-- Auth: deferred to Phase 4 (not needed for the Phase 1 generate→GPX slice)
+- Auth: **Better Auth**, email+password only (Phase 4 — see that section below)
 
 ## Local development
 
@@ -255,6 +255,158 @@ Koča's already-verified location (0.68km apart) confirmed the stored
 coordinate was actually fine; the rest were within a few km, normal for an
 area/valley name rather than a single point. Only Rakitna was actually
 wrong.
+
+## Phase 4: auth + save/rate/share
+
+Auth is **Better Auth**, email+password only (no OAuth yet). Set
+`BETTER_AUTH_SECRET` (`openssl rand -base64 32`) and `BETTER_AUTH_URL` in
+`.env` — see `.env.example`. Rather than a parallel user table, Better
+Auth's Drizzle adapter is configured (`apps/api/src/lib/auth.ts`) to bind
+directly onto this app's existing `users` table (`usePlural: true`, plus a
+`name`→`displayName` field mapping, since that's the one column name that
+doesn't already match what Better Auth expects); three new tables it
+requires — `sessions`, `accounts`, `verifications` — were added to
+`packages/db/src/schema.ts` alongside it. The handler is mounted at
+`/api/v1/auth/*` (`app.on(["POST","GET"], "/auth/*", ...)` in
+`apps/api/src/index.ts`); the frontend talks to it via `better-auth/react`
+(`apps/web/src/lib/authClient.ts`).
+
+Saving/browsing/rating routes is a new router,
+`apps/api/src/routes/saved-routes.ts` (backed by
+`apps/api/src/lib/savedRoutes.ts`), mounted at the same `/routes` prefix as
+the Phase 1 candidate-generation router — Hono matches the existing static
+paths (`/routes/generate`, `/routes/gpx`) ahead of the new `/routes/:id`
+param routes regardless of mount order, confirmed live, no collision.
+Writes (`POST`/`PATCH`/`DELETE /routes`, `POST /routes/:id/ratings`)
+require a session, via a `requireAuth` Hono middleware
+(`apps/api/src/lib/auth-middleware.ts`) that reads `auth.api.getSession()`
+off the request headers. `visibility` (`private`/`unlisted`/`public`) gates
+reads: private routes 404 (not 403) for anyone but the owner, to avoid
+confirming they exist.
+
+Like every geometry write in this codebase (see `lib/pois.ts`,
+`seed-pois.ts`), saved routes are inserted via raw `sql` +
+`ST_GeomFromGeoJSON`/`ST_AsGeoJSON`, not Drizzle's query builder — this
+repo doesn't use the query builder anywhere, by established convention, so
+the new code followed suit rather than introducing a second style.
+
+Three real bugs surfaced by live browser testing (Playwright-driven
+Chromium against the running dev servers, not just curl/typecheck):
+
+1. `POST /routes` 500'd on every real candidate. GraphHopper-derived
+   `distanceMeters`/`estDurationSeconds` are floats (e.g. `59338.921`), but
+   `routes.distance_meters`/`est_duration_seconds` are Postgres `integer`
+   columns. Fixed by rounding both before insert
+   (`Math.round(...)` in `lib/savedRoutes.ts`).
+2. Better Auth's client threw `BetterAuthError: Invalid base URL` at import
+   time when given a relative `baseURL` (`"/api/v1/auth"`) — unlike this
+   app's plain `fetch()` calls elsewhere, which go through the Vite dev
+   proxy fine with a relative path, Better Auth's client requires an
+   absolute URL. Fixed by resolving against `window.location.origin` at
+   runtime in `authClient.ts` instead of hardcoding a host — still
+   same-origin through the proxy in dev, and in any same-origin prod
+   deploy.
+3. The first cut put the "My Routes" view toggle inside the sign-in-only
+   branch of the header auth widget, so a signed-out visitor had no way to
+   reach the anonymous-accessible "Public" tab at all — found by actually
+   testing the signed-out path in a browser, not by reasoning about the
+   component tree. Fixed by moving the toggle out of `AuthPanel` into
+   `App.tsx`'s header directly, always visible regardless of session state.
+
+Verified live end-to-end (Playwright/Chromium): sign-up, sign-in, session
+persistence across reload, generate → save a candidate, "Mine" listing,
+view-on-map for a saved route, star rating (scenic/surface/fun) + comment,
+visibility change to `public`, sign-out, and anonymous "Public" browsing
+all confirmed working, plus GPX export and delete for a saved route.
+
+## Phase 5: community POIs + mountain-pass conditions
+
+Two independent pieces. The POI half is fully built and verified live; the
+mountain-pass-conditions half is real, working code that has never
+actually talked to real data — read on for exactly why, and what's needed
+to close that loop.
+
+**POI contribution + moderation** — `POST /api/v1/pois` (auth required)
+saves a submission with `verified: false`, regardless of who submits it
+(no admin fast-path). Set `ADMIN_EMAILS` in `.env` (comma-separated) to
+name moderators — there's no role table, just an email allowlist checked
+by `requireAdmin` (`apps/api/src/lib/auth-middleware.ts`), the simplest
+mechanism that solves the actual need. Admins see a "Moderate POIs" link
+in the header (gated by `GET /api/v1/admin/status`, which the frontend
+uses only to decide what to show — the real endpoints enforce
+`requireAdmin` themselves either way), approve/reject via
+`POST /api/v1/pois/:id/verify` and `DELETE /api/v1/pois/:id`. A submitter
+or admin can `PATCH` a POI's content afterward; only admins can flip
+`verified`.
+
+Two bugs surfaced here, one of them a genuine pre-existing issue from
+Phase 3 that had simply never been exercised: `GET /pois?category=X` 500'd
+with `malformed array literal` — passing a JS array through Drizzle's
+`sql` tag as `p.category = ANY(${categories})` loses its "array" type on
+the wire, so postgres.js's driver receives a bare string. Fixed with an OR
+chain of plain equality checks instead of `ANY()` (`lib/pois.ts`). The
+second was caught while wiring the frontend, not from a bug report:
+`GET /pois`'s default (no `verified` filter → no filter at all) would have
+put a brand-new *unverified* submission straight onto the public map,
+undermining the entire point of moderation — fixed by having the
+frontend's `fetchAllPois()` request `verified=true` explicitly rather than
+relying on that permissive default (which stays permissive for other API
+consumers on purpose — a moderation queue view legitimately wants
+`verified=false`, for instance).
+
+Verified live end-to-end (Playwright/Chromium, two browser contexts —
+contributor and admin): submit a POI as one user, confirm it does *not*
+appear on the map yet, sign in as an `ADMIN_EMAILS` account, see it in
+"Moderate POIs", approve it, confirm it now appears via a direct
+`GET /pois?verified=true` check. Also verified: a non-admin gets 403 from
+the moderation queue and the verify endpoint; a stranger gets 403 trying
+to edit or delete someone else's POI; the actual owner can still edit
+their own.
+
+**Mountain-pass conditions** — the spec originally said "a public SI roads
+API" without naming one. Two real candidates were investigated live this
+session:
+
+- **promet.si**'s own B2B portal — real endpoints confirmed via their B2B
+  PDF (`https://www.promet.si/dc/b2b.dogodki.geojson?...`), but 401
+  without a token, and getting one needs a "MOJ PIC" account plus emailing
+  `info@promet.si`.
+- **NAP (nap.si)**, Slovenia's EU-mandated National Access Point — the
+  user registered here mid-session, and it turned out to be the better
+  channel: same underlying publisher (DARS/PIC), but a proper self-service
+  dataset-request flow and a standard OAuth2 API. Confirmed live via curl:
+  `POST https://b2b.nap.si/uc/user/token` returns `{"error":"invalid_client"}`
+  (400) unauthenticated — a real OAuth2 password-grant endpoint, not a
+  guess — and `GET https://b2b.nap.si/data/b2b.events.geojson.en_US`
+  returns 401 without a bearer token. Recommended datasets: "Roadworks
+  (english GeoJSON)" and "Traffic events (english GeoJSON)" — JSON body,
+  English, GeoJSON geometry, least parsing work.
+
+**Decided: NAP.** `apps/api/src/lib/napClient.ts` implements the confirmed
+OAuth2 password-grant flow (`NAP_USERNAME`/`NAP_PASSWORD`/`NAP_CLIENT_ID`
+env vars) and normalizes the GeoJSON response into a `NapEvent` shape,
+unit-tested against a hand-built fixture (`napClient.test.ts`).
+`apps/api/src/lib/passConditions.ts` cache-asides the result into a new
+`pass_conditions` table (a 15-minute max-age check on each request, not a
+scheduled job — this stack has no cron/worker process anywhere, so that's
+the pragmatic equivalent) and correlates cached events against two seeded
+`mountain_pass` POIs (Vršič, Mangart — coordinates reused from the
+already-verified `places` gazetteer entries, not re-typed) by proximity.
+
+**What's not done**: dataset approval and a working `client_id` weren't in
+hand by the end of this session, so `getAccessToken()` in `napClient.ts`
+has never actually been called against the real token endpoint. Two
+specific unknowns are flagged directly in that file's header comment:
+whether `NAP_CLIENT_SECRET` is required alongside `client_id` (depends on
+how NAP issued this account's credentials — only visible in the user's own
+NAP dashboard), and the real GeoJSON `Feature.properties` field names (the
+fixture's shape is a best-effort guess based on typical DATEX
+II-to-GeoJSON conversions from other European portals, not a captured
+real response). `GET /api/v1/conditions/passes` degrades gracefully in
+the meantime — `{configured: false}` plus the manual `passClosedInWinter`
+flag per pass — verified live. Once real credentials are available, this
+needs one real request to confirm or fix those two unknowns; ask for a
+live-verification pass at that point.
 
 ## Workspace layout
 

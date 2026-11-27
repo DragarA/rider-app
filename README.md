@@ -3,7 +3,9 @@
 [![CI](https://github.com/DragarA/rider-app/actions/workflows/ci.yml/badge.svg)](https://github.com/DragarA/rider-app/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 
-An AI-assisted motorcycle route planner for Slovenia that turns natural-language ride requests (*"3-hour twisty loop from Ljubljana around Rakitna, no highways"*) into ranked, exportable GPX loops—grounded against a PostGIS gazetteer and scored empirically for road curviness, surface quality, and mountain pass conditions.
+An AI-assisted motorcycle route planner for Slovenia that turns natural-language ride requests (*"3-hour twisty loop from Ljubljana around Rakitna, smooth asphalt, no highways"*) into ranked, exportable GPX loops—grounded against a PostGIS gazetteer and scored empirically for road curviness, surface quality, and mountain pass conditions.
+
+![Slovenian Ride Planner — AI route generation and MapLibre GL map](./docs/screenshots/route-planner.png)
 
 ### Highlights
 

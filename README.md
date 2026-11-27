@@ -1,5 +1,26 @@
 # Slovenian Ride Planner
 
+[![CI](https://github.com/DragarA/rider-app/actions/workflows/ci.yml/badge.svg)](https://github.com/DragarA/rider-app/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
+
+An AI-assisted motorcycle route planner for Slovenia that turns natural-language ride requests (*"3-hour twisty loop from Ljubljana around Rakitna, no highways"*) into ranked, exportable GPX loops—grounded against a PostGIS gazetteer and scored empirically for road curviness, surface quality, and mountain pass conditions.
+
+### Highlights
+
+- **Empirical curviness & loop ranking** (`apps/api/src/lib/curvature.ts`, `rank.ts`) — Scores routes by cumulative heading change per km (calibrated against real Slovenian roads from the A1 motorway to Vršič switchbacks) and filters GPS noise.
+- **Grounded AI extraction** — Uses a provider-agnostic AI SDK (`anthropic`, `openai`, or `openrouter`) streamed over SSE; place queries are resolved against a PostGIS trigram + `unaccent` gazetteer rather than trusting raw LLM coordinates.
+- **Full-stack geospatial architecture** — Self-hosted GraphHopper `round_trip` routing, PostgreSQL + PostGIS (Drizzle ORM), MapLibre GL JS over OpenFreeMap vector tiles, Better Auth, and GPX 1.1 export.
+
+```text
+Natural-language prompt / Map constraints (React + MapLibre GL JS)
+        │  SSE / REST
+        ▼
+Hono API (AI extraction → PostGIS gazetteer → GraphHopper loops → Curvature/Surface/Pass ranker)
+        │
+        ▼
+Ranked GPX candidates · Saved routes · Community POIs & Pass status
+```
+
 See [`PROJECT_SPEC.md`](./PROJECT_SPEC.md) for the full architecture, domain
 model, API contract, AI integration strategy, and MVP roadmap.
 
